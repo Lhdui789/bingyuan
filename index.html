@@ -82,12 +82,14 @@ canvas{position:absolute;inset:0;width:100%;height:100%;touch-action:none;displa
         <div class="hint">不用註冊、不用登入。一個人開房間，其他人輸入房號加入，最多 4 人，可以補電腦。</div>
         <div class="label">你的暱稱</div>
         <input id="nick" maxlength="8" placeholder="例如：小明" autocomplete="off">
+        <div id="pwRow"><div class="label" style="margin-bottom:6px">房主密碼（只有開房間才需要，加入朋友的房間不用填）</div>
+        <input id="hostPw" type="password" autocomplete="off" placeholder="房主密碼" style="width:100%"></div>
         <button class="primary" id="hostBtn">開一個新房間</button>
         <div class="or">或是加入朋友的房間</div>
         <div class="row"><input class="codein" id="codeIn" maxlength="5" placeholder="房號" autocomplete="off" inputmode="numeric"><button id="joinBtn">加入</button></div>
         <div class="err" id="homeErr" hidden></div>
         <div class="hint" id="busy" hidden></div>
-        <div class="hint">提醒：加入房間後，房主會看到並記錄你的暱稱、IP 位址、IP 所在的國家地區和裝置類型，用來防止搗亂。</div>
+        <div class="hint">提醒：加入房間後，房主會看到並記錄你的暱稱、IP 位址、IP 所在的國家地區、裝置類型與型號，以及加入時間，用來防止搗亂。紀錄只存在房主自己的手機裡。</div>
         <div class="label">怎麼玩</div>
         <ul class="rules">
           <li>從自己的塔<b>拖曳</b>到相連的塔就會派兵，兵力比對方多就能佔領。</li>
@@ -108,7 +110,7 @@ canvas{position:absolute;inset:0;width:100%;height:100%;touch-action:none;displa
         <div id="guests" hidden>
           <div class="label" style="margin-bottom:6px">連線資訊（只有房主看得到）</div>
           <ul class="plist" id="glist"></ul>
-          <div class="row" style="margin-top:6px"><button class="seg" id="histBtn">查看加入紀錄</button><button class="seg" id="histClr" hidden>清除紀錄</button></div>
+          <div class="row" style="margin-top:6px"><button class="seg" id="histBtn">查看加入紀錄</button><button class="seg" id="histCsv">匯出成檔案</button><button class="seg" id="histClr" hidden>清除紀錄</button></div>
           <ul class="plist" id="ghist" hidden style="margin-top:6px;font-size:12px"></ul>
         </div>
         <div id="hostOpts">
@@ -256,7 +258,20 @@ function fail(m){killPeer();setBusy('');showErr(m)}
 function enterUI(){setBusy('');showErr('');try{localStorage.setItem('by-nick',myNick())}catch(e){}
   $('codeTag').textContent='房號 '+code;$('codeTag').hidden=false;$('leaveBtn').hidden=false}
 
-$('hostBtn').onclick=async()=>{showErr('');setBusy('正在開房間…');try{await loadPeer()}catch(e){return fail('載入連線元件失敗，請檢查網路後再試一次。')}tryHost(0)};
+/* only the owner can open rooms: the password is checked against a salted PBKDF2 hash, never stored in the page */
+const HOST_SALT='f03fccf2703d31bae7348cc4275b0bd3',HOST_KEY='11d0967dabaa0415ba2a1222d34927dd211b30b48a8d7da0db08b4964e4afd47';
+const hexToBytes=h=>Uint8Array.from(h.match(/../g).map(x=>parseInt(x,16)));
+async function deriveKey(pw){const k=await crypto.subtle.importKey('raw',new TextEncoder().encode(pw),'PBKDF2',false,['deriveBits']);
+  const b=await crypto.subtle.deriveBits({name:'PBKDF2',salt:hexToBytes(HOST_SALT),iterations:200000,hash:'SHA-256'},k,256);
+  return Array.from(new Uint8Array(b)).map(x=>x.toString(16).padStart(2,'0')).join('')}
+const hostUnlocked=()=>{try{return localStorage.getItem('by-hostkey')===HOST_KEY}catch(e){return false}};
+if(hostUnlocked())$('pwRow').hidden=true;
+$('hostBtn').onclick=async()=>{showErr('');
+  if(!hostUnlocked()){const pw=$('hostPw').value;if(!pw)return showErr('開房間需要房主密碼。');
+    setBusy('驗證中…');let ok=false;try{ok=(await deriveKey(pw))===HOST_KEY}catch(e){}
+    if(!ok){setBusy('');$('hostPw').value='';return showErr('房主密碼不對。')}
+    try{localStorage.setItem('by-hostkey',HOST_KEY)}catch(e){}$('pwRow').hidden=true}
+  setBusy('正在開房間…');try{await loadPeer()}catch(e){return fail('載入連線元件失敗，請檢查網路後再試一次。')}tryHost(0)};
 function tryHost(n){
   const c=String(10000+Math.floor(Math.random()*90000));let opened=false;
   const p=new Peer(PREFIX+c,{config:{iceServers:ICE},debug:0});NET.peer=p;
@@ -273,10 +288,11 @@ function tryHost(n){
 $('joinBtn').onclick=async()=>{
   const c=$('codeIn').value.trim();if(!/^\d{5}$/.test(c))return showErr('房號是 5 個數字。');
   showErr('');setBusy('正在加入房間…');try{await loadPeer()}catch(e){return fail('載入連線元件失敗，請檢查網路後再試一次。')}
+  let model='';try{const h=await navigator.userAgentData.getHighEntropyValues(['model']);model=String(h.model||'').slice(0,40)}catch(e){}
   let done=false;const p=new Peer({config:{iceServers:ICE},debug:0});NET.peer=p;
   const to=setTimeout(()=>{if(!done){done=true;fail('連不上房間。確認房號，或換個網路（例如改用行動網路）再試。')}},20000);
   p.on('open',()=>{const conn=p.connect(PREFIX+c,{reliable:true});NET.host=conn;
-    conn.on('open',()=>{if(done)return;done=true;clearTimeout(to);code=c;isHost=false;inRoom=true;enterUI();conn.send({t:'hi',nick:myNick(),ua:navigator.userAgent.slice(0,200)});showLobby()});
+    conn.on('open',()=>{if(done)return;done=true;clearTimeout(to);code=c;isHost=false;inRoom=true;enterUI();conn.send({t:'hi',nick:myNick(),ua:navigator.userAgent.slice(0,200),model});showLobby()});
     conn.on('data',clientData);
     conn.on('close',()=>{if(inRoom&&NET.host===conn){leave();showErr('房主離開了，或連線中斷。')}});
   });
@@ -295,7 +311,7 @@ const bc=m=>{for(const c of NET.conns.values()){try{c.conn.send(m)}catch(e){}}};
 function hostData(conn,d){
   if(!d||typeof d!=='object')return;
   if(d.t==='hi'){
-    if(!NET.conns.has(conn.peer)){const e={conn,nick:String(d.nick||'玩家').slice(0,8),ua:devOf(String(d.ua||'')),ip:'查詢中'};NET.conns.set(conn.peer,e);findIp(conn,e,0)}
+    if(!NET.conns.has(conn.peer)){const e={conn,nick:String(d.nick||'玩家').slice(0,8),ua:devOf(String(d.ua||''))+(d.model?' '+String(d.model).slice(0,40):''),ip:'查詢中'};NET.conns.set(conn.peer,e);findIp(conn,e,0)}
     if(G){try{conn.send(startMsg(-1))}catch(e){}}else refreshLobby();
   }else if(d.t==='cmd'&&G&&!G.over){
     const si=seats.findIndex(s=>s.id===conn.peer);if(si<1||!G.human[si])return;
@@ -337,6 +353,12 @@ function renderGuests(){
 function renderHist(){const a=readLog().slice(-40).reverse();
   $('ghist').innerHTML=a.map(g=>{const d=new Date(g.t),p=n=>String(n).padStart(2,'0');return `<li style="font-weight:400">${p(d.getMonth()+1)}/${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}　${esc(g.nick)}<span>${esc(g.ip)}・${esc(g.dev)}</span></li>`}).join('')||'<li style="font-weight:400">還沒有紀錄</li>'}
 $('histBtn').onclick=()=>{const h=$('ghist');h.hidden=!h.hidden;$('histClr').hidden=h.hidden;$('histBtn').textContent=h.hidden?'查看加入紀錄':'收起紀錄';if(!h.hidden)renderHist()};
+$('histCsv').onclick=()=>{
+  const q=s=>'"'+String(s).replace(/"/g,'""')+'"',p=n=>String(n).padStart(2,'0');
+  const rows=['時間,暱稱,IP,地區與裝置型號',...readLog().map(g=>{const d=new Date(g.t);
+    return [`${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`,g.nick,g.ip,g.dev].map(q).join(',')})];
+  const u=URL.createObjectURL(new Blob(['﻿'+rows.join('\r\n')],{type:'text/csv;charset=utf-8'}));
+  const a=document.createElement('a');a.href=u;a.download='bingyuan-guests.csv';document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(u),3000)};
 $('histClr').onclick=()=>{try{localStorage.removeItem('by-guests')}catch(e){}renderHist()};
 function hostDrop(conn){
   if(!NET.conns.has(conn.peer))return;NET.conns.delete(conn.peer);
